@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-All modes return honest `not_implemented` placeholder results until their own stories add behavior.
+`semantic` is real on `POST /v1/query` (Story 2.3). Every other mode, and chat for all modes including `rag-semantic`, still returns an honest `not_implemented` placeholder until its own story.
 
 ## API contracts
 
@@ -73,7 +73,7 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult` placeholder per mode via one shared `run_pattern` path.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real passages for `semantic`, a `run_pattern` placeholder for every other mode.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
@@ -118,3 +118,37 @@ Each record has 14 fields: `section_id`, `act`, `act_label`, `status`, `chapter`
 - **IPC footnotes**: Amendment footnotes and historical annotations are interleaved with section text and may appear as inline artifacts in section `text`.
 - **BNS chapter markers**: Chapter boundaries are detected from `CHAPTER <roman>` lines in the body text. The BNS index (pages 2–19) provides section headings; the correspondence table (pages 20–73) is skipped.
 - **Source-hash safety rule**: If a source PDF hash changes, the corpus for that act is regenerated as an atomic replacement. Records from different PDF versions are never mixed in one corpus file.
+
+## Semantic retrieval (Story 2.3)
+
+Flow: validate → scope filters → embed query → `$vectorSearch` → resolve chunk/section → `QueryResult`. Code: `src/building_with_rag/retrieval/semantic.py`.
+
+- Validate: `question` trimmed, non-empty. `filters` values must be known strings (unknown fields rejected). `required_acts`, `chapter`, or a `caller_id` other than `WEBUI_DEMO_CALLER_ID` → HTTP 422.
+- Scope: server fixes `access_level` to `["public"]`; caller `act`/`status` lists only narrow it (empty = no narrowing). Applied inside the `$vectorSearch` `filter`.
+- Embed: raw question, `voyage-3.5`, `input_type="query"`, 1,024 dimensions. Clients are lazy; `/healthz` needs no credentials.
+- Search: index `vector_index`, path `vector`, `limit` = request limit, `numCandidates = min(200, max(limit, 50, limit * 10))`. Chunks are returned in score order (not de-duplicated by section).
+- Resolve: `chunks` (text) and `sections` (heading, chapter, source). Unresolvable hits are omitted and counted in `trace.unresolved_hits`.
+
+Outcomes:
+
+| Outcome | HTTP | Notes |
+|---|---|---|
+| `ok` | 200 | passages returned; no score cutoff |
+| `no_results` | 200 | filters match nothing indexed |
+| `retrieval_not_ready` | 503 | missing credentials, index absent/not queryable, empty embeddings, model/dimension mismatch |
+| `retrieval_upstream_error` | 502 | Voyage or MongoDB error during a query |
+| validation error | 422 | bad question, filters, scope fields, or caller |
+
+Scores rank similarity only; they do not prove a passage is correct.
+
+`generate_answer` is accepted but nothing is generated (noted in `trace.ignored`).
+
+Added optional `RetrievedChunk` fields (null when missing): `chunk_index`, `act_label`, `status`, `chapter`, `chapter_title`, `section_number`, `source_pdf`, `source_sha256`, `needs_review`.
+
+`trace`: `mode`, `query`, `embedding`, `index`, `limit`, `num_candidates`, `filters`, `caller_id`, `result_count`, `ignored`, `unresolved_hits`.
+
+Diagnostic command (text truncated):
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}'   | jq '{status, trace, results: [.results[] | {chunk_id, section_id, act, heading, score, text: .text[:80]}]}'
+```

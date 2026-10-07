@@ -27,10 +27,10 @@ Expected: six lines: `rag-semantic`, `rag-hybrid`, `rag-hybrid-reranked`, `rag-s
 ```bash
 curl -s http://127.0.0.1:8000/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "semantic"}'
+  -d '{"question": "What is theft?", "pattern": "semantic", "limit": 3}'   | jq '{status, trace, results: [.results[] | {chunk_id, section_id, act, heading, score, text: .text[:80]}]}'
 ```
 
-Expected: `"status":"not_implemented"`, `"message":"Pattern 'semantic' is not implemented yet..."`.
+Expected: `"status":"ok"`, up to 3 results in non-increasing score order, populated `trace`. Needs ingested data (Story 2.2). `filters: {"act": ["IPC_1860"], "status": ["in_force"]}` returns `no_results`; `limit: 21` returns 422.
 
 ### Query — hybrid
 

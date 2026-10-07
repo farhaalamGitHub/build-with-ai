@@ -705,13 +705,13 @@ def corpus_exists_and_matches(output_path: Path, expected_sha: str) -> bool:
     if not output_path.exists():
         return False
     try:
-        with open(output_path) as f:
+        with open(output_path, encoding="utf-8") as f:
             first_line = f.readline().strip()
             if not first_line:
                 return False
             record = json.loads(first_line)
             return record.get("source_sha256") == expected_sha
-    except (json.JSONDecodeError, KeyError):
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError):
         return False
 
 
@@ -820,7 +820,7 @@ def _print_summary() -> None:
             print(f"{label}: file not found", file=sys.stderr)
             continue
         records = []
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
