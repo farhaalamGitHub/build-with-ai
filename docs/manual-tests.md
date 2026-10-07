@@ -153,3 +153,76 @@ uv run python scripts/extract_sections.py
 ```
 
 Expected: prints "BNS corpus up to date — skipping" and "IPC corpus up to date — skipping". No records appended or overwritten.
+
+## Story 2.2 — MongoDB Vector Index
+
+What it adds: loads the corpus into MongoDB (sources, sections, chunks, embeddings) and creates `vector_index`. Needs `MONGODB_URI` and `VOYAGE_API_KEY` in `.env`.
+
+### Run ingestion
+
+```bash
+uv run python -m building_with_rag.ingestion.ingest
+```
+
+Expected: ends with `=== Ingestion complete ===`; `Collections: sources=2, sections=858, chunks=923, embeddings=923`; `embeddings == chunks: True`; `Index status: READY`; sample vector length 1024. Re-running skips existing records. A free Voyage key takes about 30 minutes on the first run; it is safe to interrupt and re-run.
+
+## Story 2.3 — Semantic Retrieval
+
+What it adds: `pattern: "semantic"` on `/v1/query` returns ranked source passages. Needs the Story 2.2 data.
+
+Prerequisite: start the API — `uv run uvicorn building_with_rag.app:app --host 127.0.0.1 --port 8000`
+
+### Success
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "What is the punishment for theft?", "pattern": "semantic", "limit": 3}'   | jq '{status, trace, results: [.results[] | {chunk_id, section_id, act, heading, score, text: .text[:80]}]}'
+```
+
+Expected: `"status":"ok"`, `pattern` `semantic`, up to 3 results in non-increasing score order, populated `trace`.
+
+### No results (filters match nothing)
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "theft", "pattern": "semantic", "filters": {"act": ["IPC_1860"], "status": ["in_force"]}}'   | jq '{status, message, results}'
+```
+
+Expected: HTTP 200, `"status":"no_results"`, empty `results` (IPC is repealed).
+
+### Invalid filter (failure)
+
+```bash
+curl -s -w ' HTTP %{http_code}
+' http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "theft", "pattern": "semantic", "filters": {"act": {"$ne": "x"}}}'
+```
+
+Expected: HTTP 422. `"limit": 21` also returns 422.
+
+## Story 3.1 — Grounded Answer Generation
+
+What it adds: `generate_answer: true` on semantic `/v1/query` attaches `generation` (outcome, claims, citations). Needs ingested data and the LiteLLM proxy from `.env`.
+
+Prerequisite: start the API — `uv run uvicorn building_with_rag.app:app --host 127.0.0.1 --port 8000`
+
+### Answerable
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question": "What is the punishment for theft under the BNS?", "pattern": "semantic", "limit": 5, "generate_answer": true}'   | jq '{status, g: (.generation | {outcome, model, provider, context_outcome, text: (.text[:300]), claims: [.claims[] | {t: .text[:80], e: .evidence_labels}], citations: [.citations[] | {label, chunk_id, section_id, act, heading}], trace}), ctx: [.results[] | {chunk_id, section_id, act, score}]}'
+```
+
+Expected: `outcome: "answered"`, non-empty `text`, claims with labels, citations whose `chunk_id` values appear in `ctx` and `trace.labels`, and `section_id` prefix matching `act` (`bns:` ↔ `BNS_2023`).
+
+### Unsupported question
+
+Same command with `"question": "What is the GST rate on restaurant services?"`.
+
+Expected: `outcome: "insufficient_evidence"`, empty `text`, no claims or citations; `ctx` still lists the retrieved passages.
+
+### Generation unavailable
+
+Start the API with `GENERATION_API_KEY=` empty (or the proxy stopped) and repeat the answerable request.
+
+Expected: HTTP 200, `outcome: "unavailable"`, empty `text`, `results` present.
+
+### No generation requested
+
+Semantic request without `generate_answer`. Expected: `"generation": null`.

@@ -189,8 +189,6 @@ def semantic_query(request: QueryRequest) -> QueryResult:
         "ignored": [],
         "unresolved_hits": 0,
     }
-    if request.generate_answer:
-        trace["ignored"].append("generate_answer: no answer is generated in semantic retrieval")
 
     try:
         db = _db()
