@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` is real on `POST /v1/query` (Story 2.3). Every other mode, and chat for all modes including `rag-semantic`, still returns an honest `not_implemented` placeholder until its own story.
+`semantic` is real on both `POST /v1/query` (Story 2.3) and `/v1/chat/completions` (Story 3.2). Every other mode still returns an honest `not_implemented` placeholder until its own story.
 
 ## API contracts
 
@@ -77,13 +77,13 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
-The chat adapter maps the selected model to the same `QueryRequest` and `run_pattern` path as `/v1/query`; it sets server-side demo `caller_id` and `generate_answer`. Supports normal OpenAI Chat Completions JSON responses and role/content/stop frames, plus the OpenAI-style error envelope before streaming begins. No duplicated implementations, no custom SSE events that Open WebUI cannot render.
+The chat adapter maps the selected model to the same `QueryRequest` and shared pipeline (`pipeline.py`: `retrieve` + `answer_events`) as `/v1/query`; it sets server-side demo `caller_id` and `generate_answer`. Supports normal OpenAI Chat Completions JSON responses and role/content/stop frames, plus the OpenAI-style error envelope before streaming begins. No duplicated implementations, no custom SSE events that Open WebUI cannot render.
 
 ## Open WebUI (trainer-supplied, separate client)
 
 The trainer-supplied Open WebUI bundle is the chat client, run separately from the capstone API. Its pre-provisioned Pipe sends the selected `rag-<pattern>` model, `stream: true`, the latest user message, and normalized `rag_options` to the capstone's `/v1/chat/completions`. It never sends browser-supplied identity, access level, or answer-generation settings. The capstone's adapter accepts that exact request and uses server-side `caller_id`/`generate_answer`.
 
-`/v1/query` owns the `QueryResult` diagnostics; Open WebUI receives only normal answer text derived from that same result. Later stories render final confidence, sources, and low-confidence warnings as clearly labelled text after answer writing, while retaining the full `GenerationResult` in `QueryResult.generation`.
+`/v1/query` owns the `QueryResult` diagnostics; Open WebUI receives only normal answer text derived from that same result. Story 3.2 renders `DRAFT` lines, the confidence footer, and sources as labelled text around the streamed answer; the full `GenerationResult` stays in `QueryResult.generation` on `/v1/query`.
 
 ## Environment
 
@@ -175,4 +175,25 @@ Only `answered` carries text, claims, citations, and supporting passages. All fo
 
 Added optional `GenerationResult` fields: `outcome`, `claims` (`text`, `evidence_labels`), `citations` (`label`, `chunk_id`, `section_id`, `act`, `heading`, `chapter`, `section_number`, `source_pdf`), `supporting_passages`, `provider` (`openai-compatible`), `trace`, `context_outcome` (`assembled` | `empty`). `trace` holds labels→chunk_id, selected/omitted counts, characters, latency, and the model's reason or error kind; no prompt text or secrets.
 
-Chat (`/v1/chat/completions`) and streaming stay placeholders until Story 3.2.
+Chat and streaming are covered by Story 3.2 below.
+
+## Streamed answers and confidence (Story 3.2)
+
+Shared path: `pipeline.py` — `retrieve(request)` (semantic → `semantic_query`, other modes → placeholder) then `answer_events(question, retrieval)`. `/v1/query` drains the events and attaches the final `GenerationResult`; chat forwards `text`/`notice` events and renders the footer from the same final result. One request is one generation/validation operation, never two independent model calls. Retrieval errors are raised before any streaming starts (OpenAI-style envelope on chat, existing detail on query). Non-semantic modes and `generate_answer=false` keep placeholder text / `generation: null` with no model call.
+
+Event flow (`generation/answer.py`, `stream_answer`):
+
+1. Context assembly (unchanged, once per request). Empty context → `insufficient_evidence`, no model call.
+2. Attempt: streamed plain-text answer with inline `[E1]` labels (`stream: true`, `temperature: 0`, 30 s timeout per call, `httpx` only). The first characters are buffered so an `INSUFFICIENT_EVIDENCE: <reason>` reply is never streamed as an answer. Each attempt that produces text starts with the `DRAFT — checking evidence` notice.
+3. Checks, recording every failure as an issue: `citation_labels` (every cited label was supplied; nothing is stripped or rewritten), `claim_cited` (every sentence/bullet carries a label; text non-empty), `support` (one non-streamed validator call judges each claim against its cited passage; strict JSON).
+4. `MAX_ATTEMPTS = 2`: a retry runs only after a failed attempt, and its prompt carries the plain-language issues. The stream shows `Check failed: <detail>. Retrying (attempt 2 of 2)…` between attempts.
+
+Added optional `GenerationResult` fields: `confidence` (`high` only when the final attempt passes all checks; `low` when it fails a check; `None` when no text could be judged), `issues` (`attempt`, `check`, `detail`; all attempts kept), `attempts` (`attempt`, `status` passed|failed|unjudged, `chars`, `latency_ms`), `draft_answer` (last attempt text when it did not pass), `low_confidence_reason`.
+
+Outcome mapping (existing four values): passed → `answered` (text = validated answer, confidence high); final check failed → `malformed` with empty `text`, `draft_answer`, `issues`, confidence low; provider failure → `unavailable`; validator unreachable → `unavailable` with `draft_answer`, no confidence; validator invalid reply → `malformed`, no confidence; `insufficient_evidence` unchanged. Only `answered` carries claims, citations, and supporting passages.
+
+What Open WebUI shows (text only): `DRAFT — checking evidence` before each attempt's text; on pass, `Evidence check passed — confidence: high` and `Sources:` lines (`E1 · BNS §303 · Theft · bns:303`); on a failed final check, `DRAFT — low confidence, not the final answer.` with the reason and failed checks; for `insufficient_evidence`, one plain sentence with no confidence. Streamed drafts cannot be retracted, so the closing text always says whether the answer was checked.
+
+Failure after text began: one final line `Answer generation unavailable — the text above is an unchecked draft.`, then the stop chunk and `data: [DONE]` (HTTP 200 once streaming has begun). Before any text: `Answer generation unavailable.`
+
+`CAPSTONE_API_KEY`: when non-empty, `/v1/chat/completions` requires `Authorization: Bearer <key>` (constant-time compare; otherwise 401 `invalid_api_key`, before streaming). When empty there is no check. `/v1/query`, `/v1/models`, and `/healthz` are unchanged. Chat also accepts the Pipe's nested `rag_options.filters.{act,status}` in addition to the flat fields.

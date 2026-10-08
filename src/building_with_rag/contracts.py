@@ -85,6 +85,19 @@ class GenerationCitation(BaseModel):
     source_pdf: str | None = None
 
 
+class GenerationIssue(BaseModel):
+    attempt: int
+    check: str
+    detail: str
+
+
+class GenerationAttempt(BaseModel):
+    attempt: int
+    status: Literal["passed", "failed", "unjudged"]
+    chars: int
+    latency_ms: int
+
+
 class GenerationResult(BaseModel):
     text: str = ""
     model: str | None = None
@@ -96,6 +109,12 @@ class GenerationResult(BaseModel):
     provider: str | None = None
     trace: dict = Field(default_factory=dict)
     context_outcome: Literal["assembled", "empty"] | None = None
+    # Story 3.2: bounded validation and confidence.
+    confidence: Literal["high", "low"] | None = None
+    issues: list[GenerationIssue] = Field(default_factory=list)
+    attempts: list[GenerationAttempt] = Field(default_factory=list)
+    draft_answer: str = ""
+    low_confidence_reason: str = ""
 
 
 class QueryResult(BaseModel):
@@ -113,8 +132,16 @@ class QueryResult(BaseModel):
     hyde_hypothetical_text_debug: str | None = None
 
 
+class ChatNestedFilters(BaseModel):
+    """The Open WebUI Pipe sends filters as rag_options.filters.{act,status}."""
+
+    act: list[str] = Field(default_factory=list)
+    status: list[str] = Field(default_factory=list)
+
+
 class ChatRagOptions(BaseModel):
     pattern: Pattern = Pattern.SEMANTIC
+    filters: ChatNestedFilters | None = None
     act: list[str] = Field(default_factory=list)
     status: list[str] = Field(default_factory=list)
     access_level: list[str] = Field(default_factory=list)

@@ -58,6 +58,17 @@ only allowed from `127.0.0.1`).
    save, and send a question. Hover the chip and click `×` to turn it off;
    re-enable it from the integrations menu next to `+`.
 
+## Reading answers
+
+- `DRAFT — checking evidence` starts every answer attempt. The text under it is streamed before the evidence check finishes, so it cannot be retracted.
+- `Check failed: … Retrying (attempt 2 of 2)…` means the first draft failed a check; ignore it and read the next attempt.
+- `Evidence check passed — confidence: high` followed by `Sources:` lines marks the checked answer.
+- `DRAFT — low confidence, not the final answer.` means the final attempt failed a check; do not rely on the text above it.
+- `Answer generation unavailable` means the model service failed; any text above is an unchecked draft.
+- A single plain sentence with no confidence line means the retrieved passages did not support an answer.
+
+The Pipe's `capstone_api_key` Valve must equal the app's `CAPSTONE_API_KEY` when that is set; leave both empty otherwise. After changing `building_with_rag_ui_preview.py` (now v0.3.1), re-paste it via **Function Menu → Edit** and save.
+
 ## Safe cleanup
 
 If you want to remove this incomplete local shell, first stop the server, then

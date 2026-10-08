@@ -1,0 +1,60 @@
+"""The one shared path for /v1/query and /v1/chat/completions.
+
+retrieve -> (context assembly -> generation -> validation) -> final outcome.
+Retrieval and context assembly are never streamed; only answer writing yields events.
+"""
+
+from collections.abc import Iterator
+
+from building_with_rag.contracts import GenerationResult, QueryRequest, QueryResult
+from building_with_rag.generation.answer import Event, stream_answer
+from building_with_rag.registry import Pattern, run_pattern
+from building_with_rag.retrieval.semantic import semantic_query
+
+OUTCOME_SENTENCES = {
+    "answered": "A grounded answer with citations is attached.",
+    "insufficient_evidence": "The retrieved passages do not support an answer.",
+    "unavailable": "Answer generation is unavailable; retrieved passages are still returned.",
+    "malformed": "The model reply was invalid and discarded; retrieved passages are still returned.",
+}
+LOW_CONFIDENCE_SENTENCE = (
+    "The answer failed evidence checks (low confidence) and is withheld; "
+    "see generation.issues and generation.draft_answer."
+)
+
+
+def retrieve(request: QueryRequest) -> QueryResult:
+    """Semantic -> real retrieval; every other mode -> its placeholder. Errors raise HTTPException."""
+    if request.pattern is Pattern.SEMANTIC:
+        return semantic_query(request)
+    return QueryResult(**run_pattern(request.pattern, request.question, request.caller_id))
+
+
+def answer_events(question: str, retrieval: QueryResult) -> Iterator[Event]:
+    """Run the single generation/validation operation; the last event carries the final result."""
+    return stream_answer(question, retrieval.results)
+
+
+def attach_generation(retrieval: QueryResult, generation: GenerationResult) -> QueryResult:
+    retrieval.generation = generation
+    sentence = (
+        LOW_CONFIDENCE_SENTENCE
+        if generation.confidence == "low"
+        else OUTCOME_SENTENCES[generation.outcome]
+    )
+    retrieval.message = f"{retrieval.message} {sentence}"
+    return retrieval
+
+
+def wants_answer(request: QueryRequest) -> bool:
+    return request.pattern is Pattern.SEMANTIC and request.generate_answer
+
+
+def run_query(request: QueryRequest) -> QueryResult:
+    """Non-streaming caller (/v1/query): retrieve, drain the events, attach the final result."""
+    retrieval = retrieve(request)
+    if wants_answer(request):
+        for event in answer_events(request.question, retrieval):
+            if event.kind == "final":
+                attach_generation(retrieval, event.generation)
+    return retrieval
