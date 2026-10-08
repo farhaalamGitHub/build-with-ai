@@ -42,7 +42,7 @@ One shared registry (single source of truth) holds only:
 | decomposition | `rag-decomposition` |
 | hyde | `rag-hyde` |
 
-`semantic` (Story 2.3), `hybrid` (Story 4.1), and `hybrid-reranked` (Story 4.2) are real on both `POST /v1/query` and `/v1/chat/completions` (answers: Stories 3.1–3.2). The selected mode decides the route; there is no automatic routing or fallback between modes. `structured`, `decomposition`, and `hyde` still return an honest `not_implemented` placeholder until their own stories.
+`semantic` (Story 2.3), `hybrid` (Story 4.1), `hybrid-reranked` (Story 4.2), and `structured` (Story 5.1) are real on both `POST /v1/query` and `/v1/chat/completions` (answers: Stories 3.1–3.2). The selected mode decides the route; there is no automatic routing or fallback between modes. `decomposition` and `hyde` still return an honest `not_implemented` placeholder until their own stories.
 
 ## API contracts
 
@@ -73,7 +73,7 @@ A retrieved passage is always this shape: `chunk_id`, `section_id`, `act`, `text
 ### Endpoints
 
 - `GET /healthz` — safe, no credentials required.
-- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real passages for `semantic`, `hybrid`, and `hybrid-reranked`, a `run_pattern` placeholder for every other mode.
+- `POST /v1/query` — accepts `QueryRequest`, returns `QueryResult`: real passages for `semantic`, `hybrid`, `hybrid-reranked`, and `structured`, a `run_pattern` placeholder for every other mode.
 - `GET /v1/models` — lists the six `rag-<pattern>` model IDs.
 - `POST /v1/chat/completions` — OpenAI-compatible, text-only `ChatCompletionRequest`: `model`, `messages` with `system`/`developer`/`user`/`assistant` roles, `stream`, `n`, and optional strict `rag_options` (`pattern`, list filters, `limit`, `required_acts`, `chapter`).
 
@@ -247,4 +247,31 @@ Diagnostic command (text truncated; merges returned and omitted records):
 curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
   -d '{"question":"What is the difference between culpable homicide and murder?","pattern":"hybrid-reranked","limit":5}' \
   | jq '{status, t: .trace.rerank, r: [(.results[]|.+{kept:true}), (.omitted_candidates[]|.+{kept:false})] | map({section_id, kept, fr: .fused_rank, fs: .fused_score, rr: .rerank_rank, rs: .rerank_score, why: .omitted_reason, text: .text[:50]}) | sort_by(.fr)}'
+```
+
+## Structured exact retrieval (Story 5.1)
+
+`pattern: "structured"` (`rag-structured`) classifies the question into validated `StructuredSignals`, then makes one read-only `find_one` on the `sections` collection for the exact BNS or IPC section named. It is not LLM extraction, not a semantic-search replacement, and not a router: the selected mode decides the route, with no fallback to or from other modes. No Voyage call, embedding, vector index, or keyword index is used. Code: `src/building_with_rag/retrieval/structured.py`; `StructuredSignals` is in `contracts.py` (`intent`, `act`, `section_number` 1–999, `chapter`, `status` ok|recommendation|clarification_needed, `reason`).
+
+**Exact-input contract.** Only the classifier's validated output — `act`, `section_number`, and an optional validated `chapter` — plus server filters may reach MongoDB. The raw question text never enters a predicate, and no operators come from request fields. The predicate is `{act, section_number, access_level: {$in: ["public"]}}` plus `status: {$in: …}` when `filters.status` is given and `chapter` when given; one document is fetched, without `provenance`. `chapter` comes only from `QueryRequest.chapter` (1–40 characters of letters, digits, spaces, `.` and `-`; otherwise 422 `unsupported_option`), never from the question text. `required_acts` and a foreign `caller_id` are rejected with 422.
+
+Classifier rules, in order (pure, rule-based, no LLM, no I/O):
+1. "how many", "count", "total number" → `aggregation`, `recommendation`, no lookup.
+2. "list", "all sections", "which sections", "sections in/under …" → `filter`, `recommendation`, no lookup.
+3. A section reference (`section N`, `sec. N`, `s. N`, `§N`; integer only) plus exactly one act token (`BNS`, `IPC`, "Bharatiya Nyaya Sanhita", "Indian Penal Code", case-insensitive) and one distinct number → `ok`.
+4. A section number with no act, both acts, several numbers, a non-integer (for example `103A`) or an out-of-range number → `clarification_needed`; acts are never guessed. An act filter that excludes the named act also gives `clarification_needed` with no query.
+5. Anything else → `recommendation` (use `semantic` or `hybrid` for open questions).
+
+Outcomes (`QueryResult.status`, HTTP 200 unless noted): `ok` (one `RetrievedChunk` with `chunk_id = section_id`, `text` = section text, `score = 1.0` marking an exact match, not a similarity; source fields copied); `not_found` (valid request, no record in this corpus — not a claim that the law has no such section); `clarification_needed`; `recommendation`; 503 `retrieval_not_ready` (missing `MONGODB_URI`, only when a lookup is needed); 502 `retrieval_upstream_error` (MongoDB failure). Trace: `mode`, `signals`, `mongodb_called`, `collection`, `filters`, `caller_id`, `result_count`, and for `ok` a `record` (`section_id`, `status`, `source_status_version`).
+
+**Answer boundary.** Retrieval returns the exact record. An explanation is produced only through the existing grounded-answer path when `generate_answer: true` (chat always requests it), and only after an `ok` lookup: `pipeline.should_answer` and `answer_events` make no model call for `not_found`, `clarification_needed`, or `recommendation`. Chat then streams the result `message` as plain content with the same framing, and `/v1/query` leaves `generation` unset. `status` and `source_status_version` describe the source document; they do not claim current legal applicability.
+
+Limitations: integer section numbers only (no `103A`); no multi-section or cross-act comparison; filter and aggregation questions are recognised but not executed; 11 IPC sections (4, 5, 18, 34, 40, 75, 161–165) are absent from `sections`; rule-based phrasing misses reworded questions; a section longer than the 12,000-character context cap yields `insufficient_evidence` when an answer is requested (direct inspection still returns it).
+
+Diagnostic command (text truncated):
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"What does BNS section 103 say?","pattern":"structured"}' \
+  | jq '{status, t: (.trace | {signals, mongodb_called, record}), r: [.results[] | {section_id, act, status, text: .text[:60]}]}'
 ```

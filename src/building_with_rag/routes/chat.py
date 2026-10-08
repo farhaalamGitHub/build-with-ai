@@ -23,7 +23,7 @@ from building_with_rag.contracts import (
     QueryResult,
     SemanticFilters,
 )
-from building_with_rag.pipeline import answer_events, retrieve, wants_answer
+from building_with_rag.pipeline import answer_events, retrieve, should_answer
 from building_with_rag.registry import MODEL_ID_TO_PATTERN
 from building_with_rag.settings import get_settings
 
@@ -151,8 +151,8 @@ def _closing(generation: GenerationResult, streamed_text: bool) -> str:
 
 def _pieces(query_request: QueryRequest, retrieval: QueryResult) -> Iterator[str]:
     """Readable text pieces for one operation; stream and JSON responses both use these."""
-    if not wants_answer(query_request):
-        yield retrieval.message  # placeholder modes keep their existing message
+    if not should_answer(query_request, retrieval):
+        yield retrieval.message  # placeholders and non-ok structured results: plain message
         return
     streamed_text = False
     for event in answer_events(query_request.question, retrieval):
