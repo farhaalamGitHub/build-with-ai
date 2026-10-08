@@ -9,6 +9,8 @@ from collections.abc import Iterator
 from building_with_rag.contracts import GenerationResult, QueryRequest, QueryResult
 from building_with_rag.generation.answer import Event, stream_answer
 from building_with_rag.registry import Pattern, run_pattern
+from building_with_rag.retrieval.hybrid import run_hybrid
+from building_with_rag.retrieval.rerank import run_hybrid_reranked
 from building_with_rag.retrieval.semantic import semantic_query
 
 OUTCOME_SENTENCES = {
@@ -23,10 +25,18 @@ LOW_CONFIDENCE_SENTENCE = (
 )
 
 
+# Modes with real retrieval; each shares context assembly, generation, and streaming.
+REAL_PATTERNS = frozenset({Pattern.SEMANTIC, Pattern.HYBRID, Pattern.HYBRID_RERANKED})
+
+
 def retrieve(request: QueryRequest) -> QueryResult:
-    """Semantic -> real retrieval; every other mode -> its placeholder. Errors raise HTTPException."""
+    """The selected mode decides the route (no automatic routing); others -> placeholder."""
     if request.pattern is Pattern.SEMANTIC:
         return semantic_query(request)
+    if request.pattern is Pattern.HYBRID:
+        return run_hybrid(request)
+    if request.pattern is Pattern.HYBRID_RERANKED:
+        return run_hybrid_reranked(request)
     return QueryResult(**run_pattern(request.pattern, request.question, request.caller_id))
 
 
@@ -47,7 +57,7 @@ def attach_generation(retrieval: QueryResult, generation: GenerationResult) -> Q
 
 
 def wants_answer(request: QueryRequest) -> bool:
-    return request.pattern is Pattern.SEMANTIC and request.generate_answer
+    return request.pattern in REAL_PATTERNS and request.generate_answer
 
 
 def run_query(request: QueryRequest) -> QueryResult:

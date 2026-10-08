@@ -37,20 +37,22 @@ Expected: `"status":"ok"`, up to 3 results in non-increasing score order, popula
 ```bash
 curl -s http://127.0.0.1:8000/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "hybrid"}'
+  -d '{"question": "criminal breach of trust", "pattern": "hybrid", "limit": 5}' \
+  | jq '{status, t: (.trace | {contribution}), r: [.results[] | {section_id, score, sr: .semantic_rank, kr: .keyword_rank, fr: .fused_rank}]}'
 ```
 
-Expected: `"status":"not_implemented"`, message references `hybrid`.
+Expected: `"status":"ok"`; real fused passages (see Story 4.1).
 
 ### Query — hybrid-reranked
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is theft?", "pattern": "hybrid-reranked"}'
+  -d '{"question": "What is theft?", "pattern": "hybrid-reranked", "limit": 5}' \
+  | jq '{status, t: .trace.rerank, r: [.results[] | {section_id, fr: .fused_rank, rr: .rerank_rank, rs: .rerank_score}]}'
 ```
 
-Expected: `"status":"not_implemented"`, message references `hybrid-reranked`.
+Expected: `"status":"ok"`; real re-ranked passages (see Story 4.2).
 
 ### Query — structured
 
@@ -97,7 +99,7 @@ Expected: 422 validation error (question below min_length 1).
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}]}'
+  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}]}'
 ```
 
 Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contains `not implemented yet`.
@@ -107,7 +109,7 @@ Expected: `"object":"chat.completion"`, `"finish_reason":"stop"`, content contai
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
+  -d '{"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}], "stream": true}'
 ```
 
 Expected: SSE `data:` frames with `delta` role then content, ending with `data: [DONE]`.
@@ -127,7 +129,7 @@ Expected: 400 with `"type":"invalid_request_error"`, `"code":"model_not_found"`.
 ```bash
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "rag-hybrid", "messages": [{"role": "system", "content": "You are helpful."}]}'
+  -d '{"model": "rag-structured", "messages": [{"role": "system", "content": "You are helpful."}]}'
 ```
 
 Expected: 400 with `"code":"missing_user_message"`.
@@ -269,4 +271,70 @@ curl -s -w ' HTTP %{http_code}\n' http://127.0.0.1:8000/v1/chat/completions -H "
 ```
 
 Expected: HTTP 401, `"code":"invalid_api_key"`.
+
+## Story 4.1 — Hybrid Search
+
+What it adds: `pattern: "hybrid"` (`rag-hybrid`) fuses semantic and Atlas Search keyword results (Reciprocal Rank Fusion). Needs the Story 2.2 data and the Atlas Search index below.
+
+### Create the keyword index (once)
+
+```bash
+uv run python -m building_with_rag.ingestion.keyword_index
+```
+
+Expected: ends with `Index 'chunk_text_index': READY (queryable)`; a second run prints `Reusing existing search index`.
+
+Prerequisite: start the API — `uv run uvicorn building_with_rag.app:app --host 127.0.0.1 --port 8000`
+
+### Hybrid query
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"What is the penalty for taking someone'"'"'s belongings without permission?","pattern":"hybrid","limit":5}' \
+  | jq '{status, t: (.trace | {semantic, keyword, fusion, contribution}), r: [.results[] | {section_id, score, sr: .semantic_rank, kr: .keyword_rank, fr: .fused_rank, text: .text[:60]}]}'
+```
+
+Expected: `"status":"ok"`, at most 5 results in non-increasing `score` (`score` equals the fused score; `fr` equals position), each with at least one of `sr`/`kr`.
+
+### Hybrid answer
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"criminal breach of trust","pattern":"hybrid","limit":5,"generate_answer":true}' \
+  | jq '{status, g: (.generation | {outcome, confidence, text: .text[:200]})}'
+```
+
+Expected: the same DRAFT/confidence/sources behavior as semantic (Story 3.2); streamed with `"model":"rag-hybrid"` on `/v1/chat/completions`.
+
+## Story 4.2 — Hybrid Re-ranking
+
+What it adds: `pattern: "hybrid-reranked"` (`rag-hybrid-reranked`) re-scores hybrid candidates with one re-ranking call before the answer. Needs the Story 4.1 index and `RERANK_API_KEY` in `.env`.
+
+Prerequisite: start the API — `uv run uvicorn building_with_rag.app:app --host 127.0.0.1 --port 8000`
+
+### Re-ranked query
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"What is the difference between culpable homicide and murder?","pattern":"hybrid-reranked","limit":5}' \
+  | jq '{status, t: .trace.rerank, r: [(.results[]|.+{kept:true}), (.omitted_candidates[]|.+{kept:false})] | map({section_id, kept, fr: .fused_rank, fs: .fused_score, rr: .rerank_rank, rs: .rerank_score, why: .omitted_reason, text: .text[:50]}) | sort_by(.fr)}'
+```
+
+Expected: `"status":"ok"`; at most 5 kept results ordered by `rr` 1..n with non-increasing `rs`; every kept result keeps its `fr`/`fs`; omitted records show `why` (`not_sent_to_reranker` has no `rr`/`rs`, `below_return_limit` has them).
+
+### Re-ranked answer
+
+```bash
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
+  -d '{"question":"What is the difference between culpable homicide and murder?","pattern":"hybrid-reranked","limit":5,"generate_answer":true}' \
+  | jq '{status, g: (.generation | {outcome, confidence, text: .text[:200]})}'
+```
+
+Expected: the same DRAFT/confidence/sources behavior as the other modes; cited chunk IDs come from `results`, never `omitted_candidates`. Chat with `"model":"rag-hybrid-reranked"` behaves the same.
+
+### Missing re-ranker key (failure)
+
+With `RERANK_API_KEY=` empty in `.env` and the API restarted, repeat the re-ranked query.
+
+Expected: HTTP 503, `"code":"retrieval_not_ready"`, no results; `hybrid` still returns `ok`. Restore the key afterwards.
 

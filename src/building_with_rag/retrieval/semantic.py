@@ -137,14 +137,14 @@ def _mongo_filter(filters: dict[str, list[str]]) -> dict:
     return {field: {"$in": values} for field, values in filters.items() if values}
 
 
-def _validate_scope(request: QueryRequest) -> None:
+def _validate_scope(request: QueryRequest, mode: str = "semantic") -> None:
     unsupported = [
         name
         for name, value in (("required_acts", request.required_acts), ("chapter", request.chapter))
         if value is not None
     ]
     if unsupported:
-        raise _unprocessable(f"{', '.join(unsupported)} not supported in semantic mode; remove it.")
+        raise _unprocessable(f"{', '.join(unsupported)} not supported in {mode} mode; remove it.")
     if request.caller_id is not None and request.caller_id != get_settings().webui_demo_caller_id:
         raise _unprocessable("caller_id is not the configured demo caller.")
 
@@ -162,6 +162,63 @@ def _embed(question: str) -> list[float]:
             f"Query embedding has {len(vector)} dimensions; expected {schema.EMBEDDING_DIMENSIONS}."
         )
     return vector
+
+
+def vector_search(emb, vector: list[float], limit: int, candidates: int, mongo_filter: dict):
+    """$vectorSearch on embeddings; filters are applied inside the search stage."""
+    return list(
+        emb.aggregate(
+            [
+                {
+                    "$vectorSearch": {
+                        "index": schema.VECTOR_INDEX_NAME,
+                        "path": "vector",
+                        "queryVector": vector,
+                        "numCandidates": candidates,
+                        "limit": limit,
+                        "filter": mongo_filter,
+                    }
+                },
+                {"$project": {"_id": 0, "chunk_id": 1, "score": {"$meta": "vectorSearchScore"}}},
+            ]
+        )
+    )
+
+
+def resolve_chunks(db, chunk_ids: list[str]) -> tuple[dict, dict]:
+    """Fetch chunks (text) and their sections (heading, chapter, source) for the given ids."""
+    chunks = {
+        c["chunk_id"]: c
+        for c in db[schema.CHUNKS_COLLECTION].find({"chunk_id": {"$in": chunk_ids}})
+    }
+    section_ids = list({c["section_id"] for c in chunks.values()})
+    sections = {
+        s["section_id"]: s
+        for s in db[schema.SECTIONS_COLLECTION].find({"section_id": {"$in": section_ids}})
+    }
+    return chunks, sections
+
+
+def build_chunk(chunk: dict, section: dict, score: float, **extra) -> RetrievedChunk:
+    """RetrievedChunk from stored records; missing source fields stay None, never guessed."""
+    return RetrievedChunk(
+        chunk_id=chunk["chunk_id"],
+        section_id=section["section_id"],
+        act=section["act"],
+        text=chunk["text"],
+        heading=section.get("heading") or "",
+        score=score,
+        chunk_index=chunk.get("chunk_index"),
+        act_label=section.get("act_label"),
+        status=section.get("status"),
+        chapter=section.get("chapter"),
+        chapter_title=section.get("chapter_title"),
+        section_number=section.get("section_number"),
+        source_pdf=section.get("source_pdf"),
+        source_sha256=section.get("source_sha256"),
+        needs_review=section.get("needs_review"),
+        **extra,
+    )
 
 
 def semantic_query(request: QueryRequest) -> QueryResult:
@@ -203,40 +260,8 @@ def semantic_query(request: QueryRequest) -> QueryResult:
                     trace=trace,
                 )
             vector = _embed(request.question)
-            hits = list(
-                emb.aggregate(
-                    [
-                        {
-                            "$vectorSearch": {
-                                "index": schema.VECTOR_INDEX_NAME,
-                                "path": "vector",
-                                "queryVector": vector,
-                                "numCandidates": candidates,
-                                "limit": limit,
-                                "filter": mongo_filter,
-                            }
-                        },
-                        {
-                            "$project": {
-                                "_id": 0,
-                                "chunk_id": 1,
-                                "score": {"$meta": "vectorSearchScore"},
-                            }
-                        },
-                    ]
-                )
-            )
-            chunks = {
-                c["chunk_id"]: c
-                for c in db[schema.CHUNKS_COLLECTION].find(
-                    {"chunk_id": {"$in": [h["chunk_id"] for h in hits]}}
-                )
-            }
-            section_ids = list({c["section_id"] for c in chunks.values()})
-            sections = {
-                s["section_id"]: s
-                for s in db[schema.SECTIONS_COLLECTION].find({"section_id": {"$in": section_ids}})
-            }
+            hits = vector_search(emb, vector, limit, candidates, mongo_filter)
+            chunks, sections = resolve_chunks(db, [h["chunk_id"] for h in hits])
         except PyMongoError:
             raise _upstream("MongoDB") from None
     except RetrievalError:
@@ -251,25 +276,7 @@ def semantic_query(request: QueryRequest) -> QueryResult:
         if chunk is None or section is None:
             unresolved += 1
             continue
-        results.append(
-            RetrievedChunk(
-                chunk_id=chunk["chunk_id"],
-                section_id=section["section_id"],
-                act=section["act"],
-                text=chunk["text"],
-                heading=section.get("heading") or "",
-                score=hit["score"],
-                chunk_index=chunk.get("chunk_index"),
-                act_label=section.get("act_label"),
-                status=section.get("status"),
-                chapter=section.get("chapter"),
-                chapter_title=section.get("chapter_title"),
-                section_number=section.get("section_number"),
-                source_pdf=section.get("source_pdf"),
-                source_sha256=section.get("source_sha256"),
-                needs_review=section.get("needs_review"),
-            )
-        )
+        results.append(build_chunk(chunk, section, hit["score"]))
     trace["result_count"] = len(results)
     trace["unresolved_hits"] = unresolved
     return QueryResult(

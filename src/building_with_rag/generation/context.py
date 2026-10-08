@@ -1,4 +1,4 @@
-"""Bounded, labelled evidence context built from semantic retrieval results."""
+"""Bounded, labelled evidence context built from retrieval results (any real retrieval mode; never omitted_candidates)."""
 
 from dataclasses import dataclass, field
 

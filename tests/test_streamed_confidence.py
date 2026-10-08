@@ -165,7 +165,7 @@ def test_capstone_api_key_enforced_when_set(setup, monkeypatch) -> None:
     setup([GOOD])
     monkeypatch.setattr(settings_module.get_settings(), "capstone_api_key", "secret")
     client = TestClient(create_app())
-    body = {"model": "rag-hybrid", "messages": [{"role": "user", "content": "q"}]}
+    body = {"model": "rag-structured", "messages": [{"role": "user", "content": "q"}]}
     wrong = client.post("/v1/chat/completions", json=body, headers={"Authorization": "Bearer x"})
     assert wrong.status_code == 401
     assert wrong.json()["detail"]["error"]["code"] == "invalid_api_key"
