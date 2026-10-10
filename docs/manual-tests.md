@@ -690,22 +690,26 @@ Offline: `uv run pytest tests/test_structured_retrieval.py tests/test_smoke.py`
 
 ## Story 5.2 — Query decomposition and HyDE
 
-Prerequisite: `.env` with `MONGODB_URI`, `VOYAGE_API_KEY`, `GENERATION_API_BASE_URL`, `GENERATION_API_KEY`. Pause ~25 s between live calls.
+Prerequisite: `.env` with `MONGODB_URI`, `VOYAGE_API_KEY`, `GENERATION_API_BASE_URL`, `GENERATION_API_KEY`; `vector_index` and `chunk_text_index` queryable. Pause ~25 s between live calls. Inspect evidence ids/passages before reading the chat answer.
 
 ```bash
-curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
-  -d '{"question":"How does the BNS punishment for murder differ from the IPC punishment for murder?","pattern":"decomposition","generate_answer":true}' \
-  | jq '{status, reason: .trace.reason, t: (.trace | {decomposition, sufficiency}), s: [.subquestions[] | {subquestion, status, reason, ids: [.results[].section_id]}], g: (.generation | {outcome, confidence, text: .text[:200]})}'
-curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" \
-  -d '{"question":"What happens to someone who secretly takes a neighbour'"'"'s bike?","pattern":"hyde","generate_answer":true}' \
-  | jq '{status, t: .trace.hyde, direct: [.hyde_direct_candidates[].section_id], hyde: [.hyde_query_candidates[].section_id], final: [.results[] | {section_id, score}], debug_chars: (.hyde_hypothetical_text_debug | length), g: (.generation | {outcome, confidence, text: .text[:200]})}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question":"How does the BNS punishment for murder differ from the IPC punishment for murder?","pattern":"decomposition","generate_answer":true}'   | jq '{status, reason: .trace.reason, t: (.trace | {decomposition, sufficiency}), s: [.subquestions[] | {subquestion, status, reason, ids: [.results[].section_id]}], r: [.results[].section_id], g: (.generation | {outcome, confidence, text: .text[:200]})}'
+curl -s http://127.0.0.1:8000/v1/query -H "Content-Type: application/json"   -d '{"question":"What happens to someone who secretly takes a neighbour'"'"'s bike?","pattern":"hyde","generate_answer":true}'   | jq '{status, t: .trace.hyde, direct: [.hyde_direct_candidates[].section_id], hyde: [.hyde_query_candidates[].section_id], final: [.results[] | {section_id, score}], debug_chars: (.hyde_hypothetical_text_debug | length), g: (.generation | {outcome, confidence, text: .text[:200]})}'
 ```
 
-Expected: decomposition `ok` with 2 `evidenced` steps from both acts; a half with no corpus evidence gives `partial_answer` naming it; "What is theft?" gives `clarify` or one subquestion. HyDE `ok`, both candidate lists populated, `debug_chars > 0`, hypothetical text absent from `message`, `trace`, `generation` and chat.
+| # | Case | Expected |
+|---|---|---|
+| 1 | Decomposition, BNS-vs-IPC murder (above) | `ok`; 2-3 `evidenced` steps with `bns:` and `ipc:` ids; every id also in `results` |
+| 2 | Decomposition, second half with no corpus evidence | `partial_answer`; `trace.reason` names the unsupported subquestion; that step `no_evidence`; no invented passages |
+| 3 | Decomposition, `"Compare it with the other law"` | `clarify`; `results: []`; no retrieval |
+| 4 | HyDE, bike question (above) | `ok`; both candidate lists populated; `results` deduplicated; `debug_chars > 0` |
+| 5 | HyDE text leak check | hypothetical text absent from `message`, `trace`, `generation`, citations and chat |
 
-Missing config: with `GENERATION_API_KEY=` empty, both modes return 503 `retrieval_not_ready` naming it (chat: OpenAI-style envelope) while `semantic` stays `ok`.
+Missing config: with `GENERATION_API_KEY=` empty, both modes return 503 `retrieval_not_ready` naming the setting (chat: OpenAI-style envelope); `semantic` stays `ok`; no hypothetical text is fabricated.
 
-Chat: `rag-decomposition` / `rag-hyde` stream DRAFT, confidence and `Sources:`; `partial_answer` prints the unsupported-part message first.
+Chat: `rag-decomposition` / `rag-hyde` stream DRAFT, confidence and `Sources:`; `partial_answer` prints the unsupported-part message first; `clarify` / `hyde_unavailable` / `no_results` print `message` only.
+
+Six-mode smoke: `GET /v1/models` lists six IDs; one small question per mode on `/v1/query` (`semantic`, `hybrid`, `hybrid-reranked`, `structured` "What does BNS section 103 say?", `decomposition`, `hyde`) returns `status`, `results`, `trace.mode`; repeat each via `/v1/chat/completions` (`rag-<mode>`) in Open WebUI.
 
 Offline: `uv run pytest tests/test_decomposition_hyde.py tests/test_smoke.py`
 
